@@ -1,0 +1,95 @@
+# ============================================================
+# docker-compose.app.yml —— 应用层覆盖文件（即"模式 B"：全容器化）
+#
+# 推荐在仓库根目录执行（根 .env 已通过 COMPOSE_FILE 指向本文件）：
+#   docker compose --profile app up -d
+#   或在根 .env 中设置 COMPOSE_PROFILES=app 后直接 docker compose up -d
+#
+# 备选（在本文件所在目录内，必须 --env-file 指向根 .env，否则 ${VAR} 插值为空）：
+#   docker compose --env-file ../.env -f docker-compose.yml -f docker-compose.app.yml --profile app up -d
+#
+# backend/worker/frontend 均带 profiles=["app"]：
+#   - 未激活 app profile 时（模式 A）不会启动任何应用容器；
+#   - 合并加载后激活 profile 即启动。
+#
+# 环境变量统一放仓库根目录 .env（env_file: ../.env 注入容器）。
+# environment 中 ${VAR} 为 compose 插值变量，来自根目录 .env。
+# ============================================================
+
+services:
+  # ---------- FastAPI 后端 ----------
+  backend:
+    build:
+      context: ../backend
+    image: kbase-backend:latest
+    container_name: kbase-backend
+    restart: unless-stopped
+    profiles: ["app"]
+    env_file:
+      - ../.env
+    environment:
+      # 容器内改用服务名访问中间件（覆盖 .env 中指向 localhost 的值）
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASSWORD}@rabbitmq:5672//
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - kbase-net
+
+  # ---------- Celery 异步任务 Worker（解析/分块/向量化） ----------
+  worker:
+    build:
+      context: ../backend
+    image: kbase-backend:latest
+    container_name: kbase-worker
+    restart: unless-stopped
+    profiles: ["app"]
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASSWORD}@rabbitmq:5672//
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - kbase-net
+
+  # ---------- 前端（Nginx 托管） ----------
+  frontend:
+    build:
+      context: ../frontend
+    image: kbase-frontend:latest
+    container_name: kbase-frontend
+    restart: unless-stopped
+    profiles: ["app"]
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - kbase-net
+
+# 网络由基础文件创建（kbase-net），此处引用即可完成合并
+networks:
+  kbase-net:

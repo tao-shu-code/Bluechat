@@ -1,0 +1,113 @@
+# ============================================================
+# docker-compose.yml —— 基础编排文件（仅中间件，即"模式 A"）
+#
+# 推荐在仓库根目录执行（根 .env 已通过 COMPOSE_FILE 指向本文件）：
+#   模式 A（仅中间件，应用在本地 IDE 运行）：
+#     docker compose up -d
+#   模式 B（全容器化，追加 backend/worker/frontend，见 docker-compose.app.yml）：
+#     docker compose --profile app up -d
+#
+# 备选：在本文件所在目录内操作时，必须显式 --env-file 指向根目录 .env，
+#       否则 compose 的 ${VAR} 插值读不到根 .env（service 的 env_file 不受影响）：
+#   docker compose --env-file ../.env up -d
+#   docker compose --env-file ../.env -f docker-compose.yml -f docker-compose.app.yml --profile app up -d
+#
+# 环境变量统一放仓库根目录 .env（本文件通过 env_file: ../.env 注入容器）。
+# ============================================================
+
+services:
+  # ---------- PostgreSQL 16（ParadeDB：pgvector + pg_search 原生 BM25） ----------
+  postgres:
+    build:
+      context: ./postgres
+    image: kbase-postgres:pg16-paradedb
+    container_name: kbase-postgres
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - kbase-net
+
+  # ---------- Redis 7（缓存 / Celery broker 备用） ----------
+  redis:
+    image: redis:7-alpine
+    container_name: kbase-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kbase-net
+
+  # ---------- RabbitMQ 3.13（消息队列，含管理界面 :15672） ----------
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: kbase-rabbitmq
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - kbase-net
+
+  # ---------- MinIO（对象存储，API :9000 / 控制台 :9001） ----------
+  minio:
+    image: minio/minio:latest
+    container_name: kbase-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    env_file:
+      - ../.env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      # 优先 curl 健康检查；新版镜像若移除 curl 则回退 mc ready local
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || mc ready local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - kbase-net
+
+# ---------- 顶层数据卷 ----------
+volumes:
+  pgdata:
+  redisdata:
+  rabbitmqdata:
+  miniodata:
+
+# ---------- 顶层网络 ----------
+networks:
+  kbase-net:
+    name: kbase-net
